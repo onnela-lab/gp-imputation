@@ -1,0 +1,416 @@
+---
+title: "Formula check"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+Assume that we observed $(X,Y)$, and we want to predict $y_{new}$ given $x_{new}$. Additionally, we assume  
+$$
+\begin{aligned}
+y_i&=f(x_i)+\epsilon_i, \epsilon_i\sim N(0,\sigma^2)\\
+\begin{bmatrix}
+    Y  \\
+    y_{new} 
+  \end{bmatrix} & \sim N \Big(0,\begin{bmatrix}
+    K(X,X)+\sigma^2I & K(X,x_{new})  \\
+    K(x_{new},X) & K(x_{new},x_{new})
+  \end{bmatrix}\Big)
+\end{aligned}
+$$
+Hence, the theoretical prediction of $y_{new}$ is   
+$f(x_{new})|X,Y\sim N\Big(K(x_{new},X)[K(X,X)+\sigma^2I]^{-1}Y, K(x_{new},x_{new})-K(x_{new},X)[K(X,X)+\sigma^2I]^{-1}K(X,x_{new})\Big)$
+
+## 1. generate data
+```{r}
+library(MASS)
+set.seed(2018) 
+n = 100
+sigma2 = 0.02
+new = 1
+
+K0=function(x1,x2){
+  exp(-(x1-x2)^2/2)
+}
+
+X=runif(n,-2,2)
+Kmat = matrix(0,nrow=n,ncol=n)
+for(i in 1:n){
+  for(j in 1:n){
+    Kmat[i,j]=K0(X[i],X[j])
+  }
+}
+#f = mvrnorm(n=1,mu=rep(0,n),Sigma=Kmat)
+#Y = f + mvrnorm(n=1,mu=rep(0,n),Sigma=diag(rep(sigma2,n)))
+Y = sin(pi*X)/(pi*X)+mvrnorm(n=1,mu=rep(0,n),Sigma=diag(rep(sigma2,n)))
+temp = seq(-2,2,0.05)
+plot(X,Y,xlim = c(-2,2),ylim=c(-0.4,1.2))
+lines(temp,sin(pi*temp)/(pi*temp),'l',col='red')
+```
+
+
+## 2. make theoretical prediction
+```{r}
+start_time <- Sys.time()
+k0=rep(0,n)
+for (i in 1:n){
+  k0[i]=K0(new,X[i])
+}
+
+f_theory=k0%*%solve(Kmat+diag(rep(sigma2,n)))%*%Y
+end_time <- Sys.time()
+c(f_theory,end_time-start_time)
+```
+```{r}
+plot(X,Y,xlim = c(-2,2),ylim=c(-0.4,1.2))
+lines(temp,sin(pi*temp)/(pi*temp),'l',col='red')
+lines(new,f_theory,col='red','p')
+```
+
+## 3. Sequential update algorithm
+$$
+\begin{aligned}
+\mu_t &= \sum_{i=1}^tK_0(x_{new},x_i)\alpha_t(i)=k_{t+1}\alpha_{t} \\
+K_t(x,x') & = K_0(x,x')+\sum_{i,j=1}^tK_0(x,x_i)C_t(ij)K_0(x_j,x')\\
+\alpha_{t+1} &= T_{t+1}(\alpha_t)+q^{(t+1)}S_{t+1}\\
+C_{t+1} &= U_{t+1}(C_t)+r^{(t+1)}S_{t+1}S^T_{t+1} \\
+S_{t+1} &= T_{t+1}(C_tk_{t+1})+e_{t+1}\\
+\sigma_x^2 &=\sigma_0^2+k_{t+1}^TC_tk_{t+1}+K_0(x_{new},x_{new})\\
+q^{(t+1)}&=(y_{t+1}-\alpha_t^Tk_{t+1})/\sigma_x^2\\
+r^{(t+1)}&=-1/\sigma_x^2\\
+k_{t+1}&=[K_0(x_1,x_{t+1}),...,K_0(x_t,x_{t+1})]
+\end{aligned}
+$$
+  
+The updating order is 
+$$
+t=0,C_0=[],\alpha_0=[] \rightarrow \sigma_x^2\rightarrow q_1,r_1\rightarrow s_1\rightarrow C_1,\alpha_1\rightarrow \sigma_x^2\rightarrow q_2,r_2\rightarrow ... 
+$$
+```{r}
+k_t=function(t){
+  if(t==1){
+    out = 0}
+  if(t>1){
+    out=c()
+    for (i in 1:(t-1)){
+      out=c(out,K0(X[i],X[t]))
+    }
+  }
+  out
+}
+
+update_s=function(t,C){
+  if(t==1){
+    s=1
+  }
+  else{
+    s=c(C%*%k_t(t),1)
+  }
+  s
+}
+
+update_c=function(t,C,r,s){
+  if(t==1){
+    U_c = 0}
+  if(t!=1){
+    U_c = cbind(rbind(C,0),0)
+  }
+  new_c = U_c + r[t]*outer(s,s)
+  new_c
+}
+
+update_alpha=function(t,alpha,q,s){
+  T_alpha = c(alpha,0)
+  new_alpha = T_alpha+q[t]*s
+  new_alpha
+}
+
+update_q=function(t,q,alpha,sigmax){
+  if(t==1){
+    out = Y[t]/sigmax
+  }
+  if(t!=1){
+    #out = (Y[t]-k0[1:(t-1)]%*%alpha)/sigmax
+    out = (Y[t]-k_t(t)%*%alpha)/sigmax
+  }
+  q=c(q,out)
+  q
+}
+```
+
+```{r}
+start_time <- Sys.time()
+C=NULL
+alpha=NULL
+r=c()
+q=c()
+sigmax = 1+sigma2
+
+for(i in 1:n){
+  q = update_q(i,q,alpha,sigmax)
+  r = c(r,-1/sigmax)
+  s = update_s(i,C)
+  C = update_c(i,C,r,s)
+  alpha = update_alpha(i,alpha,q,s)
+  sigmax = 1+sigma2+k_t(i+1)%*%C%*%k_t(i+1)
+}
+
+k0=rep(0,n)
+for (i in 1:n){
+  k0[i]=K0(new,X[i])
+}
+f_online=alpha%*%k0
+end_time <- Sys.time()
+c(f_online,end_time-start_time)
+```
+
+```{r}
+sum(abs(-C%*%Y-alpha))
+```
+
+## 4. Sparse online algorithm  
+  
+1. initialize $\alpha_0=[],C_0=[],\sigma_x^2=1+\sigma^2$  
+  
+2. t=0, compute $k_{t+1},q^{(t+1)}, r^{(t+1)},\hat{e}_{t+1},\gamma_{t+1}$,  
+$$
+\begin{aligned}
+k_{t+1}&=[K_0(x_1,x_{t+1}),...,K_0(x_t,x_{t+1})]\\
+q^{(t+1)}&=(y_{t+1}-\alpha_t^Tk_{t+1})/\sigma_x^2\\
+r^{(t+1)}&=-1/\sigma_x^2\\
+\hat{e}_{t+1}&=K_t^{-1}k_{t+1}=Q_tk_{t+1}\\
+\gamma_{t+1}&= K_0(x_{t+1},x_{t+1})-k_{t+1}^T\hat{e}_{t+1}
+\end{aligned}
+$$
+  
+3.1 if $\gamma_{t+1}<\epsilon_{tol}$, then perform the sparse update without extending the size of the parameter set, i.e.. the dimension of $\alpha$ and $C$.(we choose to threshold  $\gamma_{t+1}$ to ensure a good numerical conditioning of the Gram matrix, this way increasing its robustness). (t=0)
+$$
+\begin{aligned}
+\hat{S}_{t+1}&=C_tk_{t+1}+\hat{e}_{t+1}\\
+\eta_{t+1}&=(1+\gamma_{t+1}r^{(t+1)})^{-1}\\
+\hat{\alpha}_{t+1}&=\alpha_t+q^{(t+1)}\eta_{t+1}\hat{S}_{t+1}\\
+\hat{C}_{t+1} &= C_t+r^{(t+1)}\eta_{t+1}\hat{S}_{t+1}^T\hat{S}_{t+1} \\
+\end{aligned}
+$$
+  
+3.2.1 (else) Perform the following formula using the unit vector $e_{t + 1}$. Add the current example point to the $ \cal {BV}$ set and compute the inverse of the extended Gram matrix.  
+$$
+\begin{aligned}
+[Q_t&=K_t^{-1}]\\
+S_{t+1} &= T_{t+1}(C_tk_{t+1})+e_{t+1}\\
+\alpha_{t+1} &= T_{t+1}(\alpha_t)+q^{(t+1)}S_{t+1}\\
+C_{t+1} &= U_{t+1}(C_t)+r^{(t+1)}S_{t+1}S^T_{t+1} \\
+Q_{t+1}&= Q_t+\gamma_{t+1}^{-1}(\hat{e}_{t+1}-e_{t+1})(\hat{e}_{t+1}-e_{t+1})^T
+\end{aligned}
+$$
+  
+3.2.2 If the size of the $\cal{BV}$ set is larger than d, then compute the scores $\mathrm{\varepsilon}_i$ for all $\cal{BV}$s, find the basis vector with the minimum score and delete it from the $\cal{BV}$ set. 
+
+```{r, out.width = "65%",fig.align="center"}
+library(png)
+library(knitr)
+include_graphics('notation.png')
+```
+
+$$
+\begin{aligned}
+\mathrm{\varepsilon}_{t+1}(i)=\frac{\alpha(i)}{q(i)+c(i)}-\frac{s(i)}{q(i)}+\ln(1+\frac{c(i)}{q(i)})\\
+\end{aligned}
+$$
+where $\alpha(i),q(i),c(i),s(i)$ are the i-th diagonal elements of the respective matrices. They are
+$$
+\begin{aligned}
+\hat{\alpha}_{t+1}&=\alpha^{(r)}-\frac{\alpha^*}{c^*+q^*}(Q^*+C^*)\\
+\hat{C}_{t+1}&=C^{(r)}+\frac{Q^*Q^{*T}}{q^*}-\frac{(Q^*+C^*)(Q^*+C^*)^T}{q^*+c^*}\\
+\hat{Q}_{t+1}&=Q^{(r)}-\frac{Q^*Q^{*T}}{q^*}\\
+\hat{S}_{t+1}&=(C^{-1}_{t+1}+K_{t+1})^{-1}
+\end{aligned}
+$$
+```{r}
+## bv is the index of basis vectora in X
+update_K=function(bv){
+  d = length(bv)
+  ## compute the kernel matrix of bv using K0
+  mat=matrix(0,ncol=d,nrow=d)
+  for(i in 1:d){
+    for(j in 1:d){
+      mat[i,j]=K0(X[bv[i]],X[bv[j]])
+    }
+  }
+  mat
+}
+
+update_k=function(bv,t){
+  if(length(bv)==0){
+    out = 0}
+  if(length(bv)>=1){
+    out=c()
+    for (i in bv){
+      out=c(out,K0(X[i],X[t]))
+    }
+  }
+  out
+}
+
+update_e_hat=function(Q,k){
+  if(is.null(Q)==T){
+    out = 0
+  }
+  else{
+    out = Q%*%k
+  }
+  out
+}
+
+update_gamma=function(k,e_hat){
+  1-k%*%e_hat
+}
+
+update_q=function(t,k,alpha,sigmax){
+  if(t==1){
+    out = Y[t]/sigmax
+  }
+  if(t!=1){
+    out = (Y[t]-k%*%alpha)/sigmax
+  }
+  as.vector(out)[1]
+}
+
+update_s_hat=function(C,k,e_hat){
+  C%*%k+e_hat
+}
+
+update_eta=function(gamma,sigmax){
+  r=-1/sigmax
+  1/(1+gamma*r)
+}
+
+update_alpha_hat=function(alpha,q,eta,s_hat){
+  alpha+q*eta*s_hat
+}
+
+update_c_hat=function(C,sigmax,eta,s_hat){
+  r=-1/sigmax
+  C+r*eta*outer(s_hat,s_hat)
+}
+
+update_s=function(C,k){
+  if(is.null(C)==T){
+    s=1
+  }
+  else{
+    s=c(C%*%k,1)
+  }
+  s
+}
+
+update_alpha=function(alpha,q,s){
+  T_alpha = c(alpha,0)
+  new_alpha = T_alpha+q*s
+  new_alpha
+}
+
+update_c=function(C,sigmax,s){
+  if(is.null(C)==T){
+    U_c = 0}
+  else{
+    U_c = cbind(rbind(C,0),0)
+  }
+  r = -1/sigmax 
+  new_c = U_c+r*outer(s,s)
+  new_c
+}
+
+update_Q=function(Q,gamma,e_hat){
+  if(is.null(Q)==T){out=1}
+  else{
+    temp = c(e_hat,-1)
+    out=rbind(cbind(Q,0),0)+1/gamma*outer(temp,temp)
+  }
+  out
+}
+
+update_alpha_mat = function(alpha,Q,C){
+  t = length(alpha)-1
+  alpha[1:t]-alpha[t+1]/(C[t+1,t+1]+Q[t+1,t+1])*(Q[t+1,1:t]+C[t+1,1:t])
+}
+
+update_c_mat = function(C,Q){
+  t = nrow(C)-1
+  C[1:t,1:t]+outer(Q[t+1,1:t],Q[t+1,1:t])/Q[t+1,t+1]-outer(Q[t+1,1:t]+C[t+1,1:t],Q[t+1,1:t]+C[t+1,1:t])/(Q[t+1,t+1]+C[t+1,t+1])
+}
+
+update_q_mat = function(Q){
+  t = nrow(Q)-1
+  Q[1:t,1:t]-outer(Q[t+1,1:t],Q[t+1,1:t])/Q[t+1,t+1]
+}
+
+update_s_mat=function(C,K){
+  solve(solve(C)+K)
+}
+```
+
+```{r}
+start_time <- Sys.time()
+d = 20 ## number of basis vectors
+tol = 0.05  ## residual threshold
+Q=NULL
+C=NULL
+alpha=NULL
+bv=c()
+
+for(i in 1:n){
+  k = update_k(bv,i)
+  if(is.null(C)==T){
+    sigmax = 1+sigma2
+  }
+  if(is.null(C)==F){
+    sigmax = (1+sigma2+k%*%C%*%k)[1,1]
+  }
+  q = update_q(i,k,alpha,sigmax)
+  r = -1/sigmax
+  e_hat = update_e_hat(Q,k)
+  gamma = update_gamma(k,e_hat)[1,1]
+  if(gamma<tol){
+    s = as.vector(update_s_hat(C,k,e_hat))
+    eta = update_eta(gamma,sigmax)
+    alpha = update_alpha_hat(alpha,q,eta,s)
+    C = update_c_hat(C,sigmax,eta,s)
+  }
+  if(gamma>=tol){
+    bv = c(bv,i)
+    s = as.vector(update_s(C,k))
+    alpha = update_alpha(alpha,q,s)
+    C = update_c(C,sigmax,s)
+    Q = update_Q(Q,gamma,e_hat)
+    if(length(bv)>d){
+      alpha_mat = update_alpha_mat(alpha,Q,C)
+      c_mat = update_c_mat(C,Q)
+      q_mat = update_q_mat(Q)
+      K = update_K(bv)
+      s_mat = update_s_mat(C,K)
+      eps = rep(0,d)
+      for(j in 1:d){
+        eps[i]=alpha_mat[j,j]/(q_mat[j,j]+c_mat[j,j])-s_mat[j,j]/q_mat[j,j]+log(1+c_mat[j,j]/q_mat[j,j])
+      }
+      bv = bv[-which.min(eps)]
+    }
+  }
+}
+
+k0=rep(0,n)
+for (i in 1:n){
+  k0[i]=K0(new,X[i])
+}
+f_sparse=alpha%*%k0[bv]
+end_time <- Sys.time()
+c(f_sparse,end_time-start_time)
+```
+```{r}
+plot(X[bv],Y[bv],xlim = c(-2,2),ylim=c(-0.4,1.2))
+temp = seq(-2,2,0.05)
+lines(temp,sin(pi*temp)/(pi*temp),'l',col='red')
+lines(new,f_sparse,col='red','p')
+```
+
